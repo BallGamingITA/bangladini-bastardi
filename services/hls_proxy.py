@@ -3220,10 +3220,6 @@ class HLSProxy:
                 "-c",
                 "copy",
                 "-copyts",  # Preserve timestamps to prevent freezing/gap issues
-                "-bsf:v",
-                "h264_mp4toannexb",  # Ensure video is Annex B (MPEG-TS requirement)
-                "-bsf:a",
-                "aac_adtstoasc",  # Ensure audio is ADTS (MPEG-TS requirement)
                 "-f",
                 "mpegts",
                 "pipe:1",
