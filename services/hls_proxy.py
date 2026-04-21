@@ -2379,6 +2379,17 @@ class HLSProxy:
 
             # ✅ NUOVO: Determina se disabilitare SSL per questo dominio
             disable_ssl = get_ssl_setting_for_url(stream_url, TRANSPORT_ROUTES)
+            is_cccdn_stream = "cccdn.net" in stream_url
+
+            def _cookie_summary(value: str | None) -> str:
+                if not value:
+                    return "0"
+                return str(len([part for part in value.split(";") if part.strip()]))
+
+            def _short_url(value: str, limit: int = 120) -> str:
+                if len(value) <= limit:
+                    return value
+                return value[:limit] + "..."
 
             # ✅ Use pooled session for better performance
             if self._should_force_direct_from_query(request):
@@ -2398,6 +2409,19 @@ class HLSProxy:
                 
                 logger.info(
                     f"📡 [Proxy Stream] {routing} - Using session (direct) for: {stream_url}"
+                )
+
+            if is_cccdn_stream:
+                logger.info(
+                    "🧪 [cccdn debug] phase=pre-fetch path=%s manifest=%s referer=%s origin=%s cookie_count=%s ua=%s range=%s sid=%s",
+                    request.path,
+                    ".m3u8" in stream_url.lower() or ".mpd" in stream_url.lower(),
+                    headers.get("Referer", "-"),
+                    headers.get("Origin", "-"),
+                    _cookie_summary(headers.get("Cookie")),
+                    "1" if headers.get("User-Agent") else "0",
+                    "1" if headers.get("range") or headers.get("Range") else "0",
+                    request.query.get("hls_sid", "-"),
                 )
             
             # --- PROTECTED DOMAINS FALLBACK: curl_cffi ---
@@ -2467,6 +2491,17 @@ class HLSProxy:
                     # ✅ NUOVO: Se è un manifest, proviamo a usare smart_request come fallback
                     # se curl_cffi diretto dovesse dare ancora 403.
                     is_manifest = ".m3u8" in final_curl_url.lower() or ".mpd" in final_curl_url.lower()
+                    if is_cccdn_stream:
+                        logger.info(
+                            "🧪 [cccdn debug] phase=curl-request manifest=%s referer=%s origin=%s cookie_count=%s ua=%s sec_fetch_site=%s url=%s",
+                            is_manifest,
+                            curl_headers.get("Referer", "-"),
+                            curl_headers.get("Origin", "-"),
+                            _cookie_summary(curl_headers.get("Cookie")),
+                            "1",
+                            curl_headers.get("Sec-Fetch-Site", "-"),
+                            _short_url(final_curl_url),
+                        )
                     
                     curl_resp = await curl_s.get(
                         final_curl_url, 
@@ -2558,6 +2593,13 @@ class HLSProxy:
                     else:
                         resp_ctx = MockResp(curl_resp)
                         goto_manifest_processing = True
+                    if is_cccdn_stream:
+                        logger.info(
+                            "🧪 [cccdn debug] phase=curl-response status=%s manifest=%s final_url=%s",
+                            curl_resp.status_code,
+                            is_manifest,
+                            _short_url(str(curl_resp.url)),
+                        )
                 except Exception as e:
                     logger.error(f"❌ [curl_cffi] Error: {e}")
                     goto_manifest_processing = False
@@ -2574,6 +2616,17 @@ class HLSProxy:
                 if resp.status not in [200, 206]:
                     error_body = await resp.read()
                     routing = "WARP" if session_proxy == WARP_PROXY_URL else ("BYPASS" if session_proxy is None else "PROXY")
+                    if is_cccdn_stream:
+                        logger.warning(
+                            "🧪 [cccdn debug] phase=response-error status=%s path=%s referer=%s origin=%s cookie_count=%s content_type=%s url=%s",
+                            resp.status,
+                            request.path,
+                            headers.get("Referer", "-"),
+                            headers.get("Origin", "-"),
+                            _cookie_summary(headers.get("Cookie")),
+                            content_type,
+                            _short_url(stream_url),
+                        )
                     logger.warning(f"⚠️ Upstream returned error {resp.status} for {stream_url} [Routing: {routing}]")
                     return web.Response(body=error_body, status=resp.status, headers={"Content-Type": content_type, "Access-Control-Allow-Origin": "*"})
 
