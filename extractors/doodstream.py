@@ -93,6 +93,29 @@ class DoodStreamExtractor:
             return str(int(time.time() * 1000))
         return str(int(time.time()))
 
+    def _log_parse_debug(self, html: str) -> None:
+        markers = {
+            "pass_md5": "pass_md5" in html,
+            "makePlay": "makePlay(" in html,
+            "token=": "token=" in html,
+            "Date.now": "Date.now()" in html,
+            "cf-browser-verification": "cf-browser-verification" in html,
+            "Just a moment...": "Just a moment..." in html,
+        }
+        logger.debug(f"DoodStream HTML length: {len(html)} | markers: {markers}")
+
+        for marker in ("pass_md5", "makePlay(", "token="):
+            idx = html.find(marker)
+            if idx != -1:
+                start = max(0, idx - 180)
+                end = min(len(html), idx + 320)
+                snippet = re.sub(r"\s+", " ", html[start:end]).strip()
+                logger.debug(f"DoodStream marker snippet [{marker}]: {snippet}")
+                return
+
+        compact_html = re.sub(r"\s+", " ", html[:1200]).strip()
+        logger.debug(f"DoodStream compact HTML snippet (first 1200 chars): {compact_html}")
+
     async def extract(self, url: str, **kwargs):
         """
         Main extraction entry point. 
@@ -162,7 +185,7 @@ class DoodStreamExtractor:
                         logger.warning(f"⚠️ DoodStream: pass_md5 request failed with status {resp.status_code} and content: {resp.text[:100]}")
             
                 # Log a snippet of the HTML for debugging if tokens not found
-                logger.debug(f"HTML Snippet (first 500 chars): {html[:500]}")
+                self._log_parse_debug(html)
                 raise ExtractorError(f"DoodStream: tokens not found in HTML (status 200). CF protected? {'Yes' if 'cf-browser-verification' in html else 'No'}")
             else:
                 raise ExtractorError(f"DoodStream: cloudscraper failed to fetch embed page (status {r.status_code})")
