@@ -189,7 +189,7 @@ class MaxstreamExtractor:
 
             session = await self._get_session(proxy=proxy)
             try:
-                async with session.request(method, url, **kwargs) as response:
+                async with session.request(method, url, ssl=False, **kwargs) as response:
                     if response.status < 400:
                         if is_binary:
                             content = await response.read()
