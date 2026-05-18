@@ -108,8 +108,8 @@ class DLStreamsExtractor:
                     logger.info("💤 DLStreams: chiusa pagina live inattiva per %s", channel_key)
 
                 last_activity = self._get_shared_activity_time()
-                if time.time() - last_activity > 30:
-                    logger.info("💤 DLStreams: nessuna attività per 30 secondi. Chiusura browser condiviso...")
+                if time.time() - last_activity > 10:
+                    logger.info("💤 DLStreams: nessuna attività per 10 secondi. Chiusura browser condiviso...")
                     await close_shared_browser()
                     self._context = None
                     self._browser = None

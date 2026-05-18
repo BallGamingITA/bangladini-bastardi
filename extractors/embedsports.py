@@ -91,8 +91,8 @@ class EmbedSportsExtractor:
                     logger.info("💤 EmbedSports: chiusa pagina live inattiva per %s", cache_key)
 
                 last_activity = self._get_shared_activity_time()
-                if time.time() - last_activity > 30:
-                    logger.info("💤 EmbedSports: nessuna attività per 30 secondi. Chiusura browser condiviso...")
+                if time.time() - last_activity > 10:
+                    logger.info("💤 EmbedSports: nessuna attività per 10 secondi. Chiusura browser condiviso...")
                     await close_shared_browser()
                     self._context = None
                     self._browser = None
@@ -225,7 +225,13 @@ class EmbedSportsExtractor:
             logger.debug("EmbedSports HTTP refresh failed for %s: %s", stream_url, exc)
         return None
 
-    async def _capture_manifest(self, embed_url: str, force_refresh: bool = False, request_headers: dict | None = None) -> tuple[str, str]:
+    async def _capture_manifest(
+        self,
+        embed_url: str,
+        force_refresh: bool = False,
+        request_headers: dict | None = None,
+        background_refresh: bool = False,
+    ) -> tuple[str, str]:
         cache_key = self._cache_key(embed_url)
         lock = self._capture_locks.setdefault(cache_key, asyncio.Lock())
 
@@ -236,7 +242,7 @@ class EmbedSportsExtractor:
 
             # Try HTTP refresh first (fast path, no browser)
             if force_refresh and cached:
-                if live_page:
+                if live_page and not background_refresh:
                     self._live_pages[cache_key] = (live_page, time.time())
                 http_result = await self._http_refresh_manifest(cache_key, cached[1], request_headers)
                 if http_result:
@@ -249,7 +255,8 @@ class EmbedSportsExtractor:
 
             # Reuse live page if available
             if live_page and cached:
-                self._live_pages[cache_key] = (live_page, time.time())
+                if not background_refresh:
+                    self._live_pages[cache_key] = (live_page, time.time())
                 if not force_refresh and time.time() - cached[2] < self._manifest_cache_ttl:
                     await self._nudge_playback(live_page)
                     return cached[0], cached[1]
@@ -268,7 +275,8 @@ class EmbedSportsExtractor:
                     while time.time() < deadline:
                         refreshed = self._manifest_cache.get(cache_key)
                         if refreshed and refreshed[2] > last_seen:
-                            self._live_pages[cache_key] = (live_page, time.time())
+                            if not background_refresh:
+                                self._live_pages[cache_key] = (live_page, time.time())
                             return refreshed[0], refreshed[1]
                         await live_page.wait_for_timeout(500)
                 except Exception as exc:
@@ -399,8 +407,10 @@ class EmbedSportsExtractor:
                 url,
                 force_refresh=kwargs.get("force_refresh", False),
                 request_headers=kwargs.get("request_headers"),
+                background_refresh=kwargs.get("background_refresh", False),
             )
-            self._update_shared_activity()
+            if not kwargs.get("background_refresh", False):
+                self._update_shared_activity()
 
             cache_key = self._cache_key(url)
             cached = self._manifest_cache.get(cache_key, (None, None, None, None, {}))

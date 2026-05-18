@@ -465,6 +465,7 @@ class HLSProxy:
                             entry_source_url,
                             request_headers=captured_headers,
                             force_refresh=True,
+                            background_refresh=True,
                         )
                         suffix = urllib.parse.urlparse(captured_url).path.rsplit("/", 1)[-1]
                         refreshed_manifests = list(
@@ -482,7 +483,7 @@ class HLSProxy:
                                     refreshed_url,
                                     refreshed_manifest,
                                     refreshed_headers,
-                                    time.time(),
+                                    stored_at,
                                     entry_ttl,
                                     entry_source_url,
                                 )
@@ -3216,6 +3217,59 @@ class HLSProxy:
                                 status=retry_result["status"],
                                 headers=retry_headers,
                             )
+                    if resp.status == 403 and request.path.endswith("manifest.m3u8"):
+                        daddy_match = re.search(r"/premium(\d+)/", stream_url)
+                        referer = headers.get("Referer") or headers.get("referer") or ""
+                        if daddy_match and "dlhd" in referer.lower():
+                            try:
+                                referer_origin = f"{urllib.parse.urlparse(referer).scheme}://{urllib.parse.urlparse(referer).netloc}"
+                                channel_url = f"{referer_origin}/watch.php?id={daddy_match.group(1)}"
+                                extractor = await self.get_extractor(
+                                    channel_url,
+                                    headers,
+                                    host="dlstreams",
+                                    bypass_warp=bypass_warp,
+                                )
+                                refreshed = await extractor.extract(
+                                    channel_url,
+                                    force_refresh=True,
+                                    request_headers=headers,
+                                    bypass_warp=bypass_warp,
+                                )
+                                captured_manifest = refreshed.get("captured_manifest")
+                                refreshed_url = refreshed.get("destination_url")
+                                if captured_manifest and refreshed_url:
+                                    scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+                                    host = request.headers.get("X-Forwarded-Host", request.host)
+                                    proxy_base = f"{scheme}://{host}"
+                                    rewritten_manifest = await ManifestRewriter.rewrite_manifest_urls(
+                                        manifest_content=captured_manifest,
+                                        base_url=refreshed_url,
+                                        proxy_base=proxy_base,
+                                        stream_headers=refreshed.get("request_headers", headers),
+                                        original_channel_url=channel_url,
+                                        api_password=request.query.get("api_password"),
+                                        get_extractor_func=lambda url, hdrs, host=None: self.get_extractor(
+                                            url, hdrs, host, bypass_warp=bypass_warp
+                                        ),
+                                        no_bypass=request.query.get("no_bypass") == "1",
+                                        shorten_url_func=None,
+                                        bypass_warp=bypass_warp,
+                                        disable_ssl=request.query.get("disable_ssl") == "1",
+                                        selected_proxy=forced_proxy,
+                                    )
+                                    logger.info("✅ DLStreams manifest recovered via browser after upstream 403")
+                                    return web.Response(
+                                        text=rewritten_manifest,
+                                        headers={
+                                            "Content-Type": "application/vnd.apple.mpegurl",
+                                            "Content-Disposition": 'attachment; filename="stream.m3u8"',
+                                            "Access-Control-Allow-Origin": "*",
+                                            "Cache-Control": "no-cache",
+                                        },
+                                    )
+                            except Exception as exc:
+                                logger.debug("DLStreams manifest 403 recovery failed for %s: %s", stream_url, exc)
                     error_body = await resp.read()
                     routing = "WARP" if (session_proxy and WARP_PROXY_URL and session_proxy == WARP_PROXY_URL) else ("BYPASS" if session_proxy is None else "PROXY")
                     logger.warning(f"⚠️ Upstream returned error {resp.status} for {stream_url} [Routing: {routing}]")
