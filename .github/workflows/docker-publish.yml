@@ -1,7 +1,7 @@
 name: Build and Push Docker images to GHCR
 on:
   workflow_dispatch:
-  push:
+  push: 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ballgamingita/lepalle
