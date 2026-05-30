@@ -154,7 +154,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                 return self.extractors[key]
             elif host == "maxstream":
                 if key not in self.extractors:
-                    proxy_candidates = []
+                    proxy_candidates = _build_proxy_list(None, "maxstream")
                     for candidate in ("maxstream.video", "maxstream"):
                         p = get_proxy_for_url(
                             candidate, TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp
@@ -264,6 +264,13 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                 key = "cinemacity_direct" if bypass_warp else "cinemacity"
                 if key not in self.extractors:
                     self.extractors[key] = CinemaCityExtractor(
+                        request_headers, proxies=proxy_list
+                    )
+                return self.extractors[key]
+            elif host in ["adn", "altadefinizione", "altadefinizionestreaming"]:
+                key = "adn_direct" if bypass_warp else "adn"
+                if key not in self.extractors:
+                    self.extractors[key] = AdnExtractor(
                         request_headers, proxies=proxy_list
                     )
                 return self.extractors[key]
