@@ -68,17 +68,46 @@ class HLSProxyStreamingMixin:
             if is_special_cdn:
                 headers["Accept-Encoding"] = "identity"
 
-            # ✅ Use pooled session for better performance
+            # ✅ Use pooled session with automatic retry failover
             bypass_warp = request.query.get("warp", "").lower() == "off"
             forced_proxy = request.query.get("proxy") or None
 
-            session, _ = await self._get_proxy_session(
-                segment_url, bypass_warp=bypass_warp, forced_proxy=forced_proxy
-            )
-            disable_ssl = get_ssl_setting_for_url(segment_url, TRANSPORT_ROUTES)
-            # ✅ Use yarl.URL with encoded=True to prevent double-encoding of commas
-            final_segment_url = yarl.URL(segment_url, encoded=True)
-            async with session.get(final_segment_url, headers=headers, ssl=not disable_ssl) as resp:
+            current_proxy = forced_proxy
+            attempts = 2 if forced_proxy else 1
+            resp = None
+            resp_ctx = None
+
+            for attempt in range(attempts):
+                try:
+                    session, _ = await self._get_proxy_session(
+                        segment_url, bypass_warp=bypass_warp, forced_proxy=current_proxy
+                    )
+                    is_vavoo_req = (
+                        "vavoo" in (request.query.get("h_Referer") or "").lower()
+                        or "vavoo" in (request.query.get("h_Origin") or "").lower()
+                        or "vavoo" in (headers.get("Referer") or "").lower()
+                        or "vavoo" in (headers.get("Origin") or "").lower()
+                        or "vavoo" in (request.headers.get("Referer") or "").lower()
+                        or "vavoo" in segment_url.lower()
+                        or any(x in segment_url.lower() for x in ["/sunshine/", "lokke", "mediahubmx"])
+                    )
+                    disable_ssl = get_ssl_setting_for_url(segment_url, TRANSPORT_ROUTES) or is_vavoo_req
+                    # ✅ Use yarl.URL with encoded=True to prevent double-encoding of commas
+                    final_segment_url = yarl.URL(segment_url, encoded=True)
+                    resp_ctx = session.get(final_segment_url, headers=headers, ssl=not disable_ssl)
+                    resp = await resp_ctx.__aenter__()
+                    break
+                except (ClientConnectionError, AioProxyError, PyProxyError, asyncio.TimeoutError, OSError) as e:
+                    if attempt == 0 and current_proxy:
+                        logger.warning("Segment proxy %s failed for %s: %r. Retrying with a different proxy.", current_proxy, segment_name, e)
+                        mark_proxy_dead(current_proxy)
+                        new_proxy = get_proxy_for_url(segment_url, TRANSPORT_ROUTES, GLOBAL_PROXIES, bypass_warp=bypass_warp)
+                        if new_proxy and new_proxy != current_proxy:
+                            current_proxy = new_proxy
+                            continue
+                    raise e
+
+            try:
                 response_headers = {}
 
                 for header in [
@@ -136,6 +165,9 @@ class HLSProxyStreamingMixin:
                     if "Connection lost" not in str(e) and "closing transport" not in str(e):
                         logger.error(f"Error streaming segment {segment_name}: {str(e)}")
                     return response
+            finally:
+                if resp_ctx:
+                    await resp_ctx.__aexit__(None, None, None)
 
         except Exception as e:
             logger.error(f"Error in segment proxy: {str(e)}")
@@ -250,11 +282,21 @@ class HLSProxyStreamingMixin:
             # logger.info(f"   Final Stream Headers: {headers}")
 
             # ✅ NUOVO: Determina se disabilitare SSL per questo dominio
+            is_vavoo_req = (
+                "vavoo" in (request.query.get("h_Referer") or "").lower()
+                or "vavoo" in (request.query.get("h_Origin") or "").lower()
+                or "vavoo" in (headers.get("Referer") or "").lower()
+                or "vavoo" in (headers.get("Origin") or "").lower()
+                or "vavoo" in (request.headers.get("Referer") or "").lower()
+                or "vavoo" in stream_url.lower()
+                or any(x in stream_url.lower() for x in ["/sunshine/", "lokke", "mediahubmx"])
+            )
             disable_ssl = (
                 request.query.get("h_X-EasyProxy-Disable-SSL") == "1"
                 or request.query.get("disable_ssl") == "1"
                 or headers.get("X-EasyProxy-Disable-SSL") == "1"
                 or get_ssl_setting_for_url(stream_url, TRANSPORT_ROUTES)
+                or is_vavoo_req
             )
             headers.pop("X-EasyProxy-Disable-SSL", None)
             headers.pop("x-easyproxy-disable-ssl", None)
@@ -605,7 +647,7 @@ class HLSProxyStreamingMixin:
                     scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
                     host = request.headers.get("X-Forwarded-Host", request.host)
                     proxy_base = f"{scheme}://{host}"
-                    original_url = request.query.get("url") or request.query.get("d", "")
+                    original_url = request.query.get("orig_url") or request.query.get("url") or request.query.get("d", "")
                     use_short_hls_urls = should_use_short_manifest_urls(
                         original_url,
                         request.query.get("host", ""),
@@ -823,7 +865,14 @@ class HLSProxyStreamingMixin:
 
 
         except (ClientPayloadError, ConnectionResetError, OSError) as e:
-            # Errori tipici di disconnessione del client
+            # Errori tipici di disconnessione del client (o proxy caduto/disconnesso mid-stream)
+            active_proxy = session_proxy or forced_proxy
+            if active_proxy:
+                logger.warning(
+                    "Proxy %s failed during stream fetch (payload/reset error): %r. Marking dead.",
+                    active_proxy, e
+                )
+                mark_proxy_dead(active_proxy)
             warp_retry_response = await retry_direct_after_warp(e)
             if warp_retry_response:
                 return warp_retry_response
@@ -836,6 +885,13 @@ class HLSProxyStreamingMixin:
             asyncio.TimeoutError,
         ) as e:
             # Errori di connessione upstream
+            active_proxy = session_proxy or forced_proxy
+            if active_proxy:
+                logger.warning(
+                    "Proxy %s failed connection to source: %r. Marking dead.",
+                    active_proxy, e
+                )
+                mark_proxy_dead(active_proxy)
             warp_retry_response = await retry_direct_after_warp(e)
             if warp_retry_response:
                 return warp_retry_response
@@ -845,6 +901,13 @@ class HLSProxyStreamingMixin:
         except Exception as e:
             err_msg = str(e)
             if "Connection lost" in err_msg or "Connection reset" in err_msg:
+                active_proxy = session_proxy or forced_proxy
+                if active_proxy:
+                    logger.warning(
+                        "Proxy %s connection lost/reset: %r. Marking dead.",
+                        active_proxy, e
+                    )
+                    mark_proxy_dead(active_proxy)
                 warp_retry_response = await retry_direct_after_warp(e)
                 if warp_retry_response:
                     return warp_retry_response
@@ -862,7 +925,8 @@ class HLSProxyStreamingMixin:
                 is_proxy_err = any(x in err_lower for x in ("invalid reply", "request rejected", "connection refused", "connection reset", "proxy connection timed out", "can't connect to server", "couldn't connect", "connect call failed", "0x9", "0x7", "socks5"))
                 if is_proxy_err:
                     request._ps_retried = True
-                    logger.warning("Proxy %s failed for %s, re-extraction needed", forced_proxy, stream_url)
+                    logger.warning("Proxy %s failed for %s, marking dead and triggering re-extraction", forced_proxy, stream_url)
+                    mark_proxy_dead(forced_proxy)
                     raise Exception("PROXY_DEAD_RETRY_EXTRACTION")
 
             logger.error(
